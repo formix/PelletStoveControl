@@ -11,10 +11,13 @@
 
 const int FLASH_NVM_OFFSET = 0x290000;
 
-const int STOVE_STATE_UNKNOWN  = -1;
-const int STOVE_STATE_STOPPED  = 0;
-const int STOVE_STATE_STARTED  = 1;
-const int STOVE_STATE_INACTIVE = 2;
+
+enum StoveStates {
+  STOVE_STATE_UNKNOWN,
+  STOVE_STATE_INACTIVE,
+  STOVE_STATE_STOPPED,
+  STOVE_STATE_STARTED
+};
 
 const int PULLUP_PIN     = 25;
 const int SENSOR_PIN     = 5;
@@ -29,7 +32,7 @@ struct State {
   int curr_temp;
   int start_temp;
   int stop_temp;
-  int stove_state;
+  StoveStates stove_state;
 } _state;
 
 
@@ -42,15 +45,11 @@ void setup() {
   pinMode(STOVE_PIN, OUTPUT);
   digitalWrite(PULLUP_PIN, HIGH);
 
+  _sensor.setDelay(500);
   _activation.initialize();
-  if (digitalRead(_activation.get_id()) == HIGH) {
-    _state.stove_state = STOVE_STATE_INACTIVE;
-  }
-  else {
-      _state.stove_state = STOVE_STATE_UNKNOWN;
-  }
 
   ESP.flashRead(FLASH_NVM_OFFSET, (uint32_t*)&_state, sizeof(_state));
+  _state.stove_state = STOVE_STATE_UNKNOWN;
   _state.curr_temp = 99;
   if (_state.start_temp == -1) _state.start_temp = 20;
   if (_state.stop_temp == -1) _state.stop_temp   = 23;
@@ -69,7 +68,63 @@ void setup() {
 
 void loop() {
   xcape::ota::handle();
-  update_stove();
+
+  int activation_changed = _activation.sample();
+  int new_temp           = _sensor.readTemperature();
+  
+  if (new_temp != _state.curr_temp) {
+    _state.curr_temp = new_temp;
+    print_temp();
+  }
+
+  switch(_state.stove_state) {
+    case STOVE_STATE_UNKNOWN: {
+      bool is_active = digitalRead(_activation.get_id()) == LOW;
+      if (!is_active) {
+        deactivate_stove();
+      }
+      else {
+        if (_state.curr_temp < _state.stop_temp)
+          start_stove();
+        else
+          stop_stove();
+      }
+      break;
+    }
+
+    case STOVE_STATE_INACTIVE: {
+      if (activation_changed == -1) {
+        if (_state.curr_temp < _state.stop_temp) {
+          start_stove();
+        }
+        else {
+          stop_stove();
+        }
+      }
+      break;
+    }
+
+    case STOVE_STATE_STOPPED: {
+      if (activation_changed == 1) {
+        deactivate_stove();
+      }
+      else if (_state.curr_temp <= _state.start_temp) {
+        start_stove();
+      }
+      break;
+    }
+
+    case STOVE_STATE_STARTED: {
+      if (activation_changed == 1) {
+        deactivate_stove();
+      }
+      else if (_state.curr_temp >= _state.stop_temp) {
+        stop_stove();
+      }
+      break;
+    }
+  }
+
 }
 
 
@@ -118,64 +173,8 @@ void print_state() {
 }
 
 
-void update_stove() {
-  int new_temp = _sensor.readTemperature();
-  
-  int active_changed = _activation.sample();
-  if (active_changed > 1) {
-    delay(10);
-    return;
-  }
-  if (active_changed != 0) Serial.println(active_changed);
-  if (active_changed == 1) {
-    if (_state.stove_state == STOVE_STATE_STARTED) {
-      stop_stove();
-    }
-    _state.stove_state = STOVE_STATE_INACTIVE;
-    print_state();
-  }
-  else if (active_changed == -1) {
-    _state.stove_state = STOVE_STATE_UNKNOWN;
-  }
-
-  if (_state.stove_state == STOVE_STATE_INACTIVE) {
-    if (new_temp != _state.curr_temp) {
-      _state.curr_temp = new_temp;
-      print_temp();
-    }
-    return;
-  }
-
-  if(_state.stove_state == STOVE_STATE_UNKNOWN) {
-    if (new_temp < _state.stop_temp) {
-      start_stove();
-    }
-    else {
-      stop_stove();
-    }
-  }
-
-  if (_state.stove_state == STOVE_STATE_STOPPED) {
-    if (new_temp <= _state.start_temp) {
-      start_stove();
-    }
-  }
-  else if (_state.stove_state == STOVE_STATE_STARTED) {
-    if (new_temp >= _state.stop_temp) {
-      stop_stove();
-    }
-  }
-  if (new_temp != _state.curr_temp) {
-    _state.curr_temp = new_temp;
-    print_temp();
-  }
-}
-
 
 void start_stove() {
-  if (_state.stove_state == STOVE_STATE_INACTIVE) {
-    return;
-  }
   _state.stove_state = STOVE_STATE_STARTED;
   digitalWrite(STOVE_PIN, HIGH);
   print_state();
@@ -183,6 +182,12 @@ void start_stove() {
 
 void stop_stove() {
   _state.stove_state  = STOVE_STATE_STOPPED;
+  digitalWrite(STOVE_PIN, LOW);
+  print_state();
+}
+
+void deactivate_stove() {
+  _state.stove_state  = STOVE_STATE_INACTIVE;
   digitalWrite(STOVE_PIN, LOW);
   print_state();
 }
