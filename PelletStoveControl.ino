@@ -5,7 +5,7 @@
 #include <WiFi.h>
 #include <xcape_digitalinput.h>
 
-#include "c:/Users/jeanp/Documents/Arduino/wifi-maison.h"
+#include "../wifi-home.h"
 
 //https://docs.cirkitdesigner.com/component/f334e0a6-54f4-48e6-9e27-c51db1c94614/lcd2004i2c
 
@@ -20,6 +20,7 @@ enum StoveStates {
 };
 
 const int PULLUP_PIN     = 25;
+const int GND_PINS[]     = {13, 15, 17};
 const int SENSOR_PIN     = 5;
 const int STOVE_PIN      = 4;
 const int ACTIVATION_PIN = 32;
@@ -27,6 +28,13 @@ const int ACTIVATION_PIN = 32;
 DHT11             _sensor(SENSOR_PIN); // tempreature and humidity sensor on pin 2
 LiquidCrystal_I2C _lcd(0x27, 20, 4);
 xcape::DigitalInput _activation(32);
+xcape::DigitalInput _btn_settings(14);
+xcape::DigitalInput _btn_up(16);
+xcape::DigitalInput _btn_down(18);
+
+long _last_sensor_read;
+long _btn_settings_pressed_time;
+uint8_t _backlight_state;
 
 struct State {
   int curr_temp;
@@ -45,8 +53,16 @@ void setup() {
   pinMode(STOVE_PIN, OUTPUT);
   digitalWrite(PULLUP_PIN, HIGH);
 
-  _sensor.setDelay(500);
+  for (int i = 0; i < 3; i++) {
+    pinMode(GND_PINS[i], OUTPUT);
+    digitalWrite(GND_PINS[i], LOW);
+  }
+
+  _sensor.setDelay(0);
   _activation.initialize();
+  _btn_settings.initialize();
+  _btn_up.initialize();
+  _btn_down.initialize();
 
   ESP.flashRead(FLASH_NVM_OFFSET, (uint32_t*)&_state, sizeof(_state));
   _state.stove_state = STOVE_STATE_UNKNOWN;
@@ -57,24 +73,46 @@ void setup() {
   Serial.printf("Start temp: %i\tStop temp: %i\n", _state.start_temp, _state.stop_temp);
 
   _lcd.init(); // Initialize the LCD
-  _lcd.backlight(); // Turn on the backlight
 
   print_ip();
-  print_interval();  
-  print_temp();
+  print_interval();
+  print_empty_temp();
   print_state();
+
+  _last_sensor_read = millis();
+  _btn_settings_pressed_time = -1;
+  _backlight_state = LOW;
 }
 
 
 void loop() {
+  long now = millis();
   xcape::ota::handle();
-
-  int activation_changed = _activation.sample();
-  int new_temp           = _sensor.readTemperature();
   
-  if (new_temp != _state.curr_temp) {
-    _state.curr_temp = new_temp;
-    print_temp();
+  int activation_changed = _activation.sample();
+  int btn_settings_changed = _btn_settings.sample();
+  int btn2_changed = _btn_up.sample();
+  int btn3_changed = _btn_down.sample();
+
+
+  // Settings button pressed
+  if (btn_settings_changed == -1) {
+    _btn_settings_pressed_time = now;
+  }
+  if (btn_settings_changed == 1) {
+    if (now - _btn_settings_pressed_time <= 2000) {
+      // Quick press: switch backlight state.
+      _backlight_state = !_backlight_state;
+      if (_backlight_state == HIGH) {
+        _lcd.backlight();
+      }
+      else {
+        _lcd.noBacklight();
+      }
+    }
+    else {
+      // TODO: enter edit temp mode.
+    }
   }
 
   switch(_state.stove_state) {
@@ -125,6 +163,15 @@ void loop() {
     }
   }
 
+  if (now - _last_sensor_read > 500) {
+    int new_temp = _sensor.readTemperature();
+    if (new_temp != _state.curr_temp) {
+      _state.curr_temp = new_temp;
+      print_temp();
+    }
+    _last_sensor_read = now;
+  }
+
 }
 
 
@@ -142,6 +189,12 @@ void print_interval() {
   _lcd.print(str_buf);
 }
 
+void print_empty_temp() {
+  _lcd.setCursor(0, 2);
+  _lcd.print("Temp. ??C");
+  Serial.println("Temperature: ??C\n");  
+}
+
 void print_temp() {
   char str_buf[21];
   _lcd.setCursor(0, 2);
@@ -152,7 +205,6 @@ void print_temp() {
 
 
 void print_state() {
-  char str_buf[21];
   _lcd.setCursor(0, 3);
   if (_state.stove_state == STOVE_STATE_UNKNOWN) {
     _lcd.print("Foyer ???      ");
@@ -177,12 +229,14 @@ void print_state() {
 void start_stove() {
   _state.stove_state = STOVE_STATE_STARTED;
   digitalWrite(STOVE_PIN, HIGH);
+  print_temp();
   print_state();
 }
 
 void stop_stove() {
   _state.stove_state  = STOVE_STATE_STOPPED;
   digitalWrite(STOVE_PIN, LOW);
+  print_temp();
   print_state();
 }
 
